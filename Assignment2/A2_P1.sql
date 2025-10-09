@@ -1,6 +1,6 @@
 
 -- Drop Tables if they exists
-DROP TABLE dim_customers CASCADE;
+DROP TABLE IF EXISTS dim_customers CASCADE;
 DROP TABLE IF EXISTS dim_products CASCADE;
 DROP TABLE IF EXISTS fact_orders CASCADE;
 
@@ -59,11 +59,11 @@ VALUES ('O1', 'C1', 'P1', '2025-10-07 11:05-06', 1000);
 
 --P1.2 3. --
 UPDATE dim_customers
-	SET valid_to='2025-10-07 11:05-06', is_current = FALSE
+	SET valid_to='2025-10-07 11:06-06', is_current = FALSE
 WHERE customer_id='C1' AND is_current=TRUE;
 
 INSERT INTO dim_customers (customer_id, name, email, city, valid_from, is_current)
-SELECT customer_id, name, email, 'Chicago', '2025-10-07 11:05-06', TRUE
+SELECT customer_id, name, email, 'Chicago', '2025-10-07 11:06-06', TRUE
 FROM dim_customers
 WHERE customer_id='C1'
 ORDER BY id DESC
@@ -71,7 +71,7 @@ LIMIT 1;
 
 --P1.2 4. --
 UPDATE dim_products
-	SET valid_to='2025-10-07 11:05-06', is_current = FALSE
+	SET valid_to='2025-10-07 11:10-06', is_current = FALSE
 WHERE product_id='P1' AND is_current=TRUE;
 
 INSERT INTO dim_products (product_id, name, category, price, valid_from, is_current)
@@ -109,6 +109,26 @@ SELECT * FROM fact_orders ORDER BY order_date ASC;
 -- SELECT * FROM dim_customers;
 -- SELECT * FROM dim_products;
 
+--P2.1 1 --
+CREATE OR REPLACE VIEW as_of_orders AS
+SELECT
+	o.order_id,
+	o.order_date,
+	o.customer_id,
+	cm.name AS customer_name,
+	cm.city AS customer_city,
+	o.product_id,
+	dp.name AS product_name,
+	dp.price AS product_price,
+	o.amount
+FROM fact_orders AS o
+JOIN dim_customers AS cm
+	ON cm.customer_id = o.customer_id
+	AND o.order_date >= cm.valid_from
+	AND (cm.valid_to IS NULL OR o.order_date < cm.valid_to)
+JOIN dim_products as dp
+	ON dp.product_id = o.product_id
+	AND o.order_date >= dp.valid_from
+	AND (dp.valid_to IS NULL OR o.order_date < dp.valid_to);
 
-
-	
+SELECT * FROM as_of_orders ORDER BY order_id;
