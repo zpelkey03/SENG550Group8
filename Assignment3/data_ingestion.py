@@ -76,6 +76,10 @@ def get_connection():
 
 #Create the tables
 def create_tables(cursor):
+    cursor.execute("DROP TABLE IF EXISTS fact_sales;")
+    cursor.execute("DROP TABLE IF EXISTS dim_date;")
+    cursor.execute("DROP TABLE IF EXISTS dim_customer;")
+    cursor.execute("DROP TABLE IF EXISTS dim_product;")
     # Create all tables
     for query in [create_dim_product_sql, create_dim_customer_sql, create_dim_date_sql, create_fact_sales_sql]:
         cursor.execute(query)
