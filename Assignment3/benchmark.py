@@ -1,6 +1,10 @@
 import os
+import sys
 import time
 from pathlib import Path
+
+import json
+from datetime import datetime
 
 from dotenv import load_dotenv
 import psycopg2
@@ -60,8 +64,20 @@ def load_env() -> None:
     load_dotenv(dotenv_path=env_path)
     print(f"Using .env at: {env_path.resolve()}")
     
-def get_pg_connection() -> PGConnection:
+    # Set up PySpark environment variables to avoid Python executable issues
+    python_executable = sys.executable
+    os.environ["PYSPARK_PYTHON"] = python_executable
+    os.environ["PYSPARK_DRIVER_PYTHON"] = python_executable
     
+    # Set JAVA_HOME to use Java 21 for PySpark
+    os.environ["JAVA_HOME"] = r"C:\Zulu\zulu-21"
+    
+    print(f"Set PYSPARK_PYTHON to: {python_executable}")
+    print(f"Set PYSPARK_DRIVER_PYTHON to: {python_executable}")
+    print(f"Set JAVA_HOME to: {os.environ['JAVA_HOME']}")
+
+def get_pg_connection() -> PGConnection:
+  
     conn = psycopg2.connect(
         host=os.getenv("PGHOST", "localhost"),
         port=int(os.getenv("PGPORT", "5432")),
@@ -105,7 +121,7 @@ def create_spark_session() -> SparkSession:
         .appName("SENG550_Benchmarking_App")
         .getOrCreate()
     )
-    
+
     print("Spark Session Created:", spark.version)
     return spark
 
@@ -126,18 +142,18 @@ def load_scaled_spark_df(spark: SparkSession, csv_path: str, scale_factor: int =
     Returns:
         DataFrame: spark dataframe after scaling
     """
-    
+
     df: DataFrame = (
         spark.read.csv(csv_path, header=True, inferSchema=True)
     )
-    
+
     if scale_factor <= 1:
         df_scaled: DataFrame = df
     else:
         df_scaled = df
         for _ in range(scale_factor - 1):
             df_scaled = df_scaled.unionByName(df)
-            
+         
     df_scaled = df_scaled.cache()
     df_scaled.count()
     return df_scaled
@@ -162,36 +178,119 @@ def time_spark_squery(spark: SparkSession, sql: str, repeats: int = 3) -> float:
         durations.append(end - start)
     return sum(durations) / len(durations)
 
+def scale_postgresql_data(conn: PGConnection, scale_factor: int):
+    
+    if scale_factor <= 1:
+        return
+    print(f"Scaling PostgreSQL data by {scale_factor}x")
+    
+    with conn.cursor() as cur:
+        
+        cur.execute("DROP TABLE IF EXISTS fact_sales_scaled CASCADE;")
+        
+        cur.execute("CREATE TABLE fact_sales_scaled AS SELECT * FROM fact_sales;")
+        
+        for i in range(scale_factor - 1):
+            cur.execute("INSERT INTO fact_sales_scaled SELECT * FROM fact_sales;")
+        
+        conn.commit()
+        
+        cur.execute("SELECT COUNT(*) FROM fact_sales_scaled;")
+        row_count = cur.fetchone()[0]
+        print(f"PostgreSQL scaled table now has {row_count:,} rows")
+
+def save_benchmark_results(pg_results, spark_results, spark_scale):
+    """Save benchmark results to JSON for analysis
+
+    Args:
+        pg_results (_type_): _description_
+        spark_results (_type_): _description_
+        spark_scale (_type_): _description_
+    """
+    
+    timestamp = datetime.now().isoformat()
+    
+    results = {
+        "timestamp": timestamp,
+        "spark_scale_factor": spark_scale,
+        "postgresql_results": spark_results,
+        "performance_comparison": {}
+    }
+    
+    for name in PG_QUERIES.keys():
+        if name in spark_results:
+            pg_time = pg_results[name]
+            spark_time = spark_results[name]
+            speedup = spark_time / pg_time if pg_time > 0 else 0
+            results["performance_comparison"][name] = {
+                "postgresql_time": pg_time,
+                "spark_time": spark_time,
+                "spark_vs_postgresql_ratio": speedup
+            }
+    
+    with open("benchmark_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+        
+    print("\nResults saved to benchmark_results.json")
+
+
 def main():
     load_env()
-    
+
     csv_path = os.getenv("CSV_PATH")
     if not csv_path:
         raise RuntimeError("CSV_PATH not set in environment file")
-    
+
     spark_scale = int(os.getenv("SPARK_SCALE", "4"))
-    
+
     print(f"CSV_PATH = {csv_path}")
     print(f"SPARK_SCALE = {spark_scale}")
-    
+
     print("\n--- PostgreSQL Benchmarks ---\n")
-    
+
     conn = get_pg_connection()
     try:
+        scale_postgresql_data(conn, spark_scale)
+
+        scaled_pg_queries = {
+            "Q1_revenue_by_country": """
+        SELECT c.country, SUM(f.sales) as total_sales
+        FROM fact_sales_scaled f
+        JOIN dim_customer c ON f.customer_key = c.customer_key
+        GROUP BY c.country
+        ORDER BY total_sales DESC;
+        """,
+            "Q2_top10_product_lines": """
+        SELECT p.product_line, SUM(f.sales) AS total_sales
+        FROM fact_sales_scaled f
+        JOIN dim_product p ON f.product_key = p.product_key
+        GROUP BY p.product_line
+        ORDER BY total_sales DESC
+        LIMIT 10;
+        """,
+            "Q3_monthly_sales": """
+        SELECT d.year_id, d.month_id, d.month_name, SUM(f.sales) AS total_sales
+        FROM fact_sales_scaled f
+        JOIN dim_date d ON f.date_key = d.date_key
+        GROUP BY d.year_id, d.month_id, d.month_name
+        ORDER BY d.year_id, d.month_id;
+        """,
+        }
+
         pg_results: dict[str, float] = {}
-        for name, sql in PG_QUERIES.items():
+        for name, sql in scaled_pg_queries.items():
             avg_time = time_pg_query(conn, sql, repeats=3)
             pg_results[name] = avg_time
             print(f"{name}: {avg_time:.4f} s (avg of 3 runs)")
     finally:
         conn.close()
-        
+
     print("\n--- Spark Benchmarks ---\n")
     spark: SparkSession = create_spark_session()
     try:
         df: DataFrame = load_scaled_spark_df(spark, csv_path)
         df.createOrReplaceTempView("sales_data")
-        
+
         spark_results: dict[str, float] = {}
         for name, sql in SPARK_QUERIES.items():
             avg_time = time_spark_squery(spark, sql, repeats=3)
@@ -207,7 +306,7 @@ def main():
         pg_t = pg_results.get(name, float("nan"))
         sp_t = spark_results.get(name, float("nan"))
         print(f"{name:30s}\t{pg_t:12.4f}\t{sp_t:12.4f}")
-        
+
 
 if __name__ == "__main__":
     main()
