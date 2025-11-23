@@ -417,4 +417,5 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+Assignment3/sales_data_sample.csv
 .vscode/settings.json
